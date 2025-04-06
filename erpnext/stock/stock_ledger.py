@@ -561,11 +561,27 @@ class update_entries_after:
 		self.new_items_found = False
 		self.distinct_item_warehouses = args.get("distinct_item_warehouses", frappe._dict())
 		self.affected_transactions: set[tuple[str, str]] = set()
-		self.reserved_stock = flt(self.args.reserved_stock)
+		self.reserved_stock = self.get_reserved_stock()
 
 		self.data = frappe._dict()
 		self.initialize_previous_data(self.args)
 		self.build()
+
+	def get_reserved_stock(self):
+		sre = frappe.qb.DocType("Stock Reservation Entry")
+		posting_datetime = get_combine_datetime(self.args.posting_date, self.args.posting_time)
+		query = (
+			frappe.qb.from_(sre)
+			.select(Sum(sre.reserved_qty) - Sum(sre.delivered_qty))
+			.where(
+				(sre.item_code == self.item_code)
+				& (sre.warehouse == self.args.warehouse)
+				& (sre.docstatus == 1)
+				& (sre.creation <= posting_datetime)
+			)
+		).run()
+
+		return flt(query[0][0]) if query else 0.0
 
 	def set_precision(self):
 		self.flt_precision = cint(frappe.db.get_default("float_precision")) or 2
@@ -1196,8 +1212,20 @@ class update_entries_after:
 		frappe.db.set_value("Stock Entry Detail", sle.voucher_detail_no, "basic_rate", outgoing_rate)
 
 		# Update outgoing item's rate, recalculate FG Item's rate and total incoming/outgoing amount
-		if not sle.dependant_sle_voucher_detail_no:
+		if not sle.dependant_sle_voucher_detail_no or self.is_manufacture_entry_with_sabb(sle):
 			self.recalculate_amounts_in_stock_entry(sle.voucher_no, sle.voucher_detail_no)
+
+	def is_manufacture_entry_with_sabb(self, sle):
+		if (
+			self.args.get("sle_id")
+			and sle.serial_and_batch_bundle
+			and sle.auto_created_serial_and_batch_bundle
+		):
+			purpose = frappe.get_cached_value("Stock Entry", sle.voucher_no, "purpose")
+			if purpose in ["Manufacture", "Repack"]:
+				return True
+
+		return False
 
 	def recalculate_amounts_in_stock_entry(self, voucher_no, voucher_detail_no):
 		stock_entry = frappe.get_doc("Stock Entry", voucher_no, for_update=True)
